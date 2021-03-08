@@ -1,0 +1,172 @@
+- hosts: localhost
+
+  tasks:
+
+  - name: add public ssh key to digitalocean account
+    digital_ocean_sshkey:
+      name: 
+      oauth_token: 
+      ssh_pub_key: "{{lookup('file', '~/.ssh/id_rsa.pub') }}"
+      state: present
+    register: sshkey_result
+
+  - name: create a new droplet assigning the key
+    digital_ocean_droplet:
+      name: "{{ item }}"
+      oauth_token: 
+      size_id: 1gb
+      region: sfo3
+      image: lamp-20-04
+      wait_timeout: 700
+      unique_name: yes
+      ssh_keys: ["{{ sshkey_result.data.ssh_key.id }}"]      
+      state: present
+    with_inventory_hostnames:
+      - web
+    register: droplet_result
+
+  - name: Save IP and hostname to local hosts file /etc/hosts
+    become: yes
+    lineinfile:
+      path: /etc/hosts
+      regexp: '.*{{ item.data.droplet.name }}$'
+      line: "{{ item.data.ip_address }}  {{ item.data.droplet.name }}"
+    with_items: "{{ droplet_result.results }}"
+
+  - name: Pause for 1 Minutes to let Droplet load
+    pause:
+      minutes: 1
+- hosts: web
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    mysql_root_password: 
+    mysql_user_password: 
+
+  tasks:
+  - name: Update and upgrade apt packages
+    apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+      
+  - name: Install Required Dependencies
+    apt: name={{ item }} state=present
+    with_items:
+      - php-pear
+      - php-curl
+      - php-mbstring
+      - php-xml
+      - php-bcmath
+  
+  - name: Install Required Python Dependencies
+    apt: 
+      name: "{{ item }}"
+      state: present
+    loop:
+      - python
+      - python-setuptools
+      - python-dev
+      - build-essential
+      - python3-pymysql
+
+
+  - name: Install MySQL Dependencies
+    apt:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - mysql-common
+      - mysql-server
+      - mysql-client
+
+  - name: Start MySQL Service
+    service: 
+      name: mysql
+      state: started
+      enabled: yes
+
+  - name: Setting up mysql credentials
+    copy: 
+      src: .my.cnf
+      dest: /root/.my.cnf
+
+  - name: update mysql root password for all root accounts
+    become: true
+    mysql_user:
+      name: root
+      password: "{{ mysql_root_password }}"
+      login_user: root
+      login_password: "{{ mysql_root_password }}"
+      check_implicit_admin: yes
+      priv: "*.*:ALL,GRANT"
+  
+  - name: Create `/root/.my.cnf` with root password credentials
+    become: yes
+    template:
+      src: .my.cnf.j2
+      dest: /root/.my.cnf
+      owner: root
+      mode: 0600
+
+  - name: Create the MySQL database
+    become: true
+    mysql_db:
+      name: "wordpress_db"
+      state: present
+
+  - name: Create Database User
+    become: true
+    mysql_user:
+      name: wordpress_user
+      password: "{{ mysql_user_password }}"
+      priv: '*.*:ALL'
+      state: present
+
+  - name: Allow Firewall  Access to Port 80
+    ufw:
+      rule: allow
+      port: 80
+      proto: tcp
+
+  - name: Allow Firewall Access to Port 22
+    ufw:
+      rule: allow
+      port: 22
+      proto: tcp
+
+  - name: Restart Firewall
+    ufw:
+      state: reloaded
+
+  - name: Installing Git Please Wait
+    apt:
+      name: git
+      state: present
+      update_cache: yes
+
+  - name: Clone Wordpress into var www
+    git:  >
+      repo=https://github.com/Immain/WordPress-Test.git
+      dest=/var/www/wordpress1
+
+  - name: Removing old html directory from var
+    file:
+      path: /var/www/html
+      state: absent
+
+  - name: Move WordPress-Test to var html
+    command: mv /var/www/wordpress1  /var/www/html
+
+
+  - name: Copy wordpress virtualhost configuration to sites available
+    copy:
+      src: wordpress.conf
+      dest: /etc/apache2/sites-available
+
+  - name: Copy wordpress php configuration to var html
+    copy:
+      src: wp-config.php
+      dest: /var/www/html 
+
+  - name: Restart apache2
+    service: name=apache2 state=restarted
+
+
+
